@@ -1,4 +1,4 @@
-function [S,resida] = flint(K1,K2,Z,alpha,S)
+function [SS,resida] = flint(K1,K2,ZZ,alpha,SS,tol,maxiter,progress)
 % Fast 2D NMR relaxation distribution estimation - Matlab/octave version
 % Paul Teal, Victoria University of Wellington
 % paul.teal@vuw.ac.nz
@@ -18,6 +18,8 @@ function [S,resida] = flint(K1,K2,Z,alpha,S)
 % 0.7  2 Aug 2016
 % 0.8  6 Sep 2016  
 % 1.0 15 Sep 2016  
+% 1.1  2 Dec 2020 Changed calculation of Lipshitz constant, and introduced
+%                 some optional arguments
 
 % If you use this software, please cite P.D. Teal and C. Eccles. Adaptive
 % truncation of matrix decompositions and efficient estimation of NMR
@@ -29,7 +31,7 @@ function [S,resida] = flint(K1,K2,Z,alpha,S)
 % alpha is the (Tikhonov) regularisation (scalar) 
 % S is an optional starting estimate
 
-% K1 and K2 are the kernel matrices
+% K1 and K2 are the kernel matrices (e.g., T1 relaxation and T2 relaxation)
 % They can be created with something like this:
 %N1 = 50;       % number of data points in each dimension
 %N2 = 10000;
@@ -45,59 +47,65 @@ function [S,resida] = flint(K1,K2,Z,alpha,S)
 %K2 = exp(-tau2 * (1./T2) );     % simple T2 relaxation data
 %K1 = 1-2*exp(-tau1 *(1./T1) );  % T1 relaxation data
 
-maxiter = 100000;
+if nargin<8  progress = 500;                         end
+if nargin<7  maxiter  = 100000;                      end
+if nargin<6  tol      = 1e-5;                        end
+if nargin<5  SS       = ones(size(K1,2),size(K2,2)); end
 
-if nargin<5
-  Nx = size(K1,2);  % N1 x Nx
-  Ny = size(K2,2);  % N2 x Ny
-  S = ones(Nx,Ny);  % initial estimate
-end
-
-if nargout>1
-  resida = NaN(maxiter,1);
-end
+resida = NaN(maxiter,1);
 
 KK1 = K1'*K1;
 KK2 = K2'*K2;
-KZ12 = K1'*Z*K2;
+KZ12 = K1'*ZZ*K2;
+tZZ = trace(ZZ*ZZ');       % used for calculating residual
 
-% Lipschitz constant
-L = 2 * (trace(KK1)*trace(KK2) + alpha); % trace will be larger than largest
-                                         % eigenvalue, but not much larger
-			   
-tZZ = trace(Z*Z');       % used for calculating residual
+% Find the Lipschitz constant: The kernel matrices are poorly
+% conditioned so this will typically converge very fast
+SL = SS;
+LL = inf;
+for ii=1:100
+  lastLL = LL;
+  LL = sqrt(sum(SL(:).^2));
+  if abs(LL-lastLL)/LL < 1e-10
+    break
+  end
+  SL = SL/LL;
+  SL = KK1 * SL * KK2;
+end
+LL = 1.001 * 2 * (LL + alpha);
+fprintf('Lipschitz constant found: ii= % 2d, LL= % 1.3e\n',ii,LL)
 
-Y = S;
+YY = SS;
 tt = 1;
-fac1 = (L-2*alpha)/L;
-fac2 = 2/L;
+fac1 = (LL-2*alpha)/LL;
+fac2 = 2/LL;
 lastres = inf;
 
 for iter=1:maxiter
-  term2 = KZ12-KK1*Y*KK2;
-  Snew = fac1*Y + fac2*term2;
+  term2 = KZ12-KK1*YY*KK2;
+  Snew = fac1*YY + fac2*term2;
   Snew = max(0,Snew);
     
   ttnew = 0.5*(1 + sqrt(1+4*tt^2));
   trat = (tt-1)/ttnew;
-  Y = Snew + trat * (Snew-S);
+  YY = Snew + trat * (Snew-SS);
   tt = ttnew;
-  S = Snew;
+  SS = Snew;
 
-  if ~mod(iter,500)
+  if ~mod(iter,progress)
     % Don't calculate the residual every iteration; it takes much longer
     % than the rest of the algorithm
-    normS = alpha*norm(S(:))^2;
-    resid = tZZ -2*trace(S'*KZ12) + trace(S'*KK1*S*KK2) + normS;
+    normS = alpha*norm(SS(:))^2;
+    resid = tZZ -2*trace(SS'*KZ12) + trace(SS'*KK1*SS*KK2) + normS;
     if nargout>1
       resida(iter) = resid;
     end
-    resd = abs(resid-lastres)/resid;
+    resd = (lastres-resid)/resid;
     lastres = resid;
     % show progress
-    fprintf('%7i % 1.2e % 1.2e % 1.2e % 1.4e % 1.4e \n',...
-	    iter,tt,trat,L,resid,resd);
-    if resd<1e-5
+    fprintf('%7d % 1.2e % 1.2e % 1.4e % 1.4e \n',...
+	    iter,tt,1-trat,resid,resd);
+    if abs(resd)<tol
       return;
     end
   end
